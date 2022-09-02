@@ -27,12 +27,16 @@ impl<'c, 'r> Rebuilder<'c, 'r> {
     }
 
     pub fn debug_filtered(&self) {
-        println!("Filtered {} paths:", self.filtered.len());
-        let mut sorted_vec: Vec<_> = self.filtered.iter().collect();
-        sorted_vec.sort_unstable();
+        if self.filtered.is_empty() {
+            println!("All files were kept");
+        } else {
+            println!("Filtered {} paths:", self.filtered.len());
+            let mut sorted_vec: Vec<_> = self.filtered.iter().collect();
+            sorted_vec.sort_unstable();
 
-        for path in sorted_vec {
-            println!("  - {}", path.display());
+            for path in sorted_vec {
+                println!("  - {}", path.display());
+            }
         }
     }
 
