@@ -1,8 +1,16 @@
+mod config;
+
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 
 use git2::{BranchType, Commit, Cred, Oid, PushOptions, RemoteCallbacks, Repository, Tree};
 
-pub type Result<T> = std::result::Result<T, git2::Error>;
+use config::Config;
+
+const DEFAULT_CONFIG_PATH: &str = ".git-publish/config.yml";
+
+type Result<T> = std::result::Result<T, git2::Error>;
 
 struct Rebuilder<'r> {
     repository: &'r Repository,
@@ -10,18 +18,18 @@ struct Rebuilder<'r> {
 }
 
 impl<'r> Rebuilder<'r> {
-    pub fn new(repository: &'r Repository) -> Self {
+    fn new(repository: &'r Repository) -> Self {
         Self {
             repository,
             id_map: HashMap::new(),
         }
     }
 
-    pub fn changed(&self, id: Oid) -> bool {
+    fn changed(&self, id: Oid) -> bool {
         self.id_map.get(&id).unwrap_or(&id) != &id
     }
 
-    pub fn rebuild_tree(&mut self, tree: Tree<'r>) -> Result<Tree<'r>> {
+    fn rebuild_tree(&mut self, tree: Tree<'r>) -> Result<Tree<'r>> {
         let new_tree_id = {
             if let Some(cached) = self.id_map.get(&tree.id()) {
                 *cached
@@ -51,7 +59,7 @@ impl<'r> Rebuilder<'r> {
         Ok(self.repository.find_tree(new_tree_id)?)
     }
 
-    pub fn rebuild_commit(&mut self, commit: Commit<'r>) -> Result<Commit<'r>> {
+    fn rebuild_commit(&mut self, commit: Commit<'r>) -> Result<Commit<'r>> {
         let new_commit_id = {
             if let Some(cached) = self.id_map.get(&commit.id()) {
                 *cached
@@ -92,67 +100,90 @@ impl<'r> Rebuilder<'r> {
     }
 }
 
+fn read_config(repository: &Repository) -> Config {
+    let config_path = repository
+        .path()
+        .parent() // Repository::path() points to the .git directory
+        .unwrap()
+        .join(DEFAULT_CONFIG_PATH);
+
+    eprintln!("Reading config from {}", config_path.display());
+    let mut config_data = Vec::new();
+
+    File::open(config_path)
+        .expect("TODO")
+        .read_to_end(&mut config_data)
+        .expect("TODO");
+
+    serde_yaml::from_slice(&config_data).expect("TODO")
+}
+
 fn main() -> Result<()> {
     let rep = Repository::open_from_env()?;
+    let config = read_config(&rep);
 
-    let commit = {
-        let master = rep.find_branch("master", BranchType::Local)?;
-        master.get().peel_to_commit()?
-    };
+    for remote_config in &config.remotes {
+        let commit = {
+            let master = rep.find_branch("master", BranchType::Local)?;
+            master.get().peel_to_commit()?
+        };
 
-    let mut rebuilder = Rebuilder::new(&rep);
-    let new_commit = rebuilder.rebuild_commit(commit)?;
-    rep.branch("master-rebuilt", &new_commit, true)?;
+        let mut rebuilder = Rebuilder::new(&rep);
+        let new_commit = rebuilder.rebuild_commit(commit)?;
+        rep.branch("master-rebuilt", &new_commit, true)?;
 
-    let push_cb = || {
-        let mut push_cb = RemoteCallbacks::new();
+        let push_cb = || {
+            let mut push_cb = RemoteCallbacks::new();
 
-        push_cb.credentials(|_url, username_from_url, _allowed_types| {
-            println!("{} {:?} {:?}", _url, username_from_url, _allowed_types);
-            Cred::ssh_key(
-                username_from_url.unwrap(),
-                None,
-                std::path::Path::new(&format!(
-                    "{}/.ssh/id_ed25519",
-                    std::env::var("HOME").unwrap()
-                )),
-                None,
-            )
-        });
+            push_cb.credentials(|_url, username_from_url, _allowed_types| {
+                println!("{} {:?} {:?}", _url, username_from_url, _allowed_types);
+                Cred::ssh_key(
+                    username_from_url.unwrap(),
+                    None,
+                    std::path::Path::new(&format!(
+                        "{}/.ssh/id_ed25519",
+                        std::env::var("HOME").unwrap()
+                    )),
+                    None,
+                )
+            });
 
-        push_cb.transfer_progress(|p| {
-            eprintln!("{}/{}", p.indexed_objects(), p.total_objects());
-            eprintln!("{}/{}", p.indexed_deltas(), p.total_deltas());
-            true
-        });
+            push_cb.transfer_progress(|p| {
+                eprintln!("{}/{}", p.indexed_objects(), p.total_objects());
+                eprintln!("{}/{}", p.indexed_deltas(), p.total_deltas());
+                true
+            });
 
-        push_cb.push_update_reference(|reference, status| {
-            if let Some(msg) = status {
-                eprintln!(r"/!\ failed to push {reference}: {msg}");
-            }
+            push_cb.push_update_reference(|reference, status| {
+                if let Some(msg) = status {
+                    eprintln!(r"/!\ failed to push {reference}: {msg}");
+                } else {
+                    eprintln!("Successfully pushed {reference}");
+                }
 
-            Ok(())
-        });
+                Ok(())
+            });
 
-        push_cb
-    };
+            push_cb
+        };
 
-    let mut push_opt = PushOptions::new();
-    push_opt.remote_callbacks(push_cb());
+        let mut push_opt = PushOptions::new();
+        push_opt.remote_callbacks(push_cb());
 
-    let mut remote = rep.remote_anonymous("git@github.com:Qwant/fafnir.git")?;
+        let mut remote = rep.remote_anonymous(&remote_config.url)?;
 
-    remote.push(
-        &["refs/heads/master-rebuilt:refs/heads/master-rebuilt"],
-        Some(&mut push_opt),
-    )?;
+        remote.push(
+            &["refs/heads/master-rebuilt:refs/heads/master-rebuilt"],
+            Some(&mut push_opt),
+        )?;
 
-    remote.update_tips(
-        Some(&mut push_cb()),
-        false,
-        git2::AutotagOption::Auto,
-        Some("test"),
-    )?;
+        remote.update_tips(
+            Some(&mut push_cb()),
+            false,
+            git2::AutotagOption::Auto,
+            Some("test"),
+        )?;
+    }
 
     Ok(())
 }
