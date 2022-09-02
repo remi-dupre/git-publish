@@ -7,6 +7,7 @@ use git2::{Commit, Oid, Repository, Tree};
 pub struct Rebuilder<'c, 'r> {
     repository: &'r Repository,
     include: &'c [PathBuf],
+    exclude: &'c [PathBuf],
 
     /// Map of required objects IDs (old_id -> new_id)
     id_map: HashMap<Oid, Oid>,
@@ -17,11 +18,12 @@ pub struct Rebuilder<'c, 'r> {
 }
 
 impl<'c, 'r> Rebuilder<'c, 'r> {
-    pub fn new(repository: &'r Repository, include: &'c [PathBuf]) -> Self {
+    pub fn new(repository: &'r Repository, include: &'c [PathBuf], exclude: &'c [PathBuf]) -> Self {
         Self {
             repository,
             id_map: HashMap::new(),
             include,
+            exclude,
             filtered: HashSet::new(),
         }
     }
@@ -62,13 +64,22 @@ impl<'c, 'r> Rebuilder<'c, 'r> {
                     let entry_name = entry.name().context("found a tree entry without a name")?;
                     let entry_fullpath = prefix.join(entry_name);
 
-                    let kept_as_is = (self.include)
+                    let excluded = (self.exclude)
                         .iter()
-                        .any(|include_path| include_path == &entry_fullpath);
+                        .any(|exclude_path| exclude_path == &entry_fullpath);
+
+                    let kept_as_is = !excluded && self.include.is_empty()
+                        || (self.include)
+                            .iter()
+                            .any(|include_path| include_path == &entry_fullpath);
 
                     let rebuilt = (self.include)
                         .iter()
-                        .any(|include_path| include_path.starts_with(&entry_fullpath));
+                        .any(|include_path| include_path.starts_with(&entry_fullpath))
+                        || (kept_as_is
+                            && (self.exclude)
+                                .iter()
+                                .any(|exclude_path| exclude_path.starts_with(&entry_fullpath)));
 
                     if kept_as_is {
                         builder.insert(entry_name, entry.id(), entry.filemode())?;

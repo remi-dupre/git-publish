@@ -14,7 +14,10 @@ pub struct Config {
 #[derive(Deserialize)]
 pub struct RemoteConfig {
     pub url: String,
+    #[serde(default)]
     pub include: Vec<PathBuf>,
+    #[serde(default)]
+    pub exclude: Vec<PathBuf>,
 }
 
 const DEFAULT_CONFIG_PATH: &str = ".git-publish/config.yml";

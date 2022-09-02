@@ -57,7 +57,7 @@ fn main() -> Result<()> {
 
     for remote_config in &config.remotes {
         let commit = src_branch.get().peel_to_commit()?;
-        let mut rebuilder = Rebuilder::new(&rep, &remote_config.include);
+        let mut rebuilder = Rebuilder::new(&rep, &remote_config.include, &remote_config.exclude);
         let new_commit = rebuilder.rebuild_commit(commit)?;
 
         rebuilder.debug_changes();

@@ -49,12 +49,17 @@ remotes:
   - # Remote URL you want to publish to
     url: git@github.com:Qwant/fafnir.git
 
-    # The paths you want to keep in your remote
+    # The paths you want to keep in your remote (defaults to everything)
     include:
        - .github/
        - src/
+       - tests/
        - LICENSE
        - README.md
+
+    # The paths you want to remove (takes precedence on `include` in case of ambiguity)
+    exclude:
+      - tests/test_integration.py
 ```
 
 ### Command line
@@ -68,6 +73,7 @@ Filtered 4 paths:
   - .gitlab-ci.yml
   - .travis.yml
   - ci
+  - tests/test_integration.py
 Successfully pushed refs/heads/bar
 ```
 
