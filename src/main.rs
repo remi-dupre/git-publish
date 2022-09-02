@@ -45,7 +45,7 @@ fn main() -> Result<()> {
                 bail!("current HEAD must be a branch to publish");
             }
 
-            head.name().unwrap().to_string()
+            head.shorthand().unwrap().to_string()
         }
     };
 
