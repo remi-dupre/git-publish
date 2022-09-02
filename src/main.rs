@@ -1,27 +1,46 @@
 mod config;
 
-use std::collections::HashMap;
+use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Commit, Cred, Oid, PushOptions, RemoteCallbacks, Repository, Tree};
 
 use config::Config;
 
 const DEFAULT_CONFIG_PATH: &str = ".git-publish/config.yml";
+const WORKING_BRANCH_NAME: &str = "git-publish_working_branch";
 
-type Result<T> = std::result::Result<T, git2::Error>;
-
-struct Rebuilder<'r> {
+struct Rebuilder<'c, 'r> {
     repository: &'r Repository,
+    include: &'c [PathBuf],
+
+    /// Map of required objects IDs (old_id -> new_id)
     id_map: HashMap<Oid, Oid>,
+
+    /// Keep track of paths that have been filtered-out
+    filtered: HashSet<PathBuf>,
 }
 
-impl<'r> Rebuilder<'r> {
-    fn new(repository: &'r Repository) -> Self {
+impl<'c, 'r> Rebuilder<'c, 'r> {
+    fn new(repository: &'r Repository, include: &'c [PathBuf]) -> Self {
         Self {
             repository,
             id_map: HashMap::new(),
+            include,
+            filtered: HashSet::new(),
+        }
+    }
+
+    fn debug_filtered(&self) {
+        println!("Filtered {} paths:", self.filtered.len());
+        let mut sorted_vec: Vec<_> = self.filtered.iter().collect();
+        sorted_vec.sort_unstable();
+
+        for path in sorted_vec {
+            println!("  - {}", path.display());
         }
     }
 
@@ -29,7 +48,7 @@ impl<'r> Rebuilder<'r> {
         self.id_map.get(&id).unwrap_or(&id) != &id
     }
 
-    fn rebuild_tree(&mut self, tree: Tree<'r>) -> Result<Tree<'r>> {
+    fn rebuild_tree(&mut self, tree: &Tree<'r>, prefix: &Path) -> Result<Tree<'r>> {
         let new_tree_id = {
             if let Some(cached) = self.id_map.get(&tree.id()) {
                 *cached
@@ -37,11 +56,34 @@ impl<'r> Rebuilder<'r> {
                 let mut changed = false;
                 let mut builder = self.repository.treebuilder(Some(&tree))?;
 
-                builder.filter(|e| {
-                    let removed = matches!(e.name(), Some("ci" | ".gitlab-ci.yml"));
-                    changed |= removed;
-                    !removed
-                })?;
+                for entry in tree {
+                    let entry_name = entry.name().context("found a tree entry without a name")?;
+                    let entry_fullpath = prefix.join(entry_name);
+
+                    let kept_as_is = (self.include)
+                        .iter()
+                        .any(|include_path| include_path == &entry_fullpath);
+
+                    let rebuilt = (self.include)
+                        .iter()
+                        .any(|include_path| include_path.starts_with(&entry_fullpath));
+
+                    if kept_as_is {
+                        builder.insert(entry_name, entry.id(), entry.filemode())?;
+                    } else if rebuilt {
+                        let entry_tree = self.repository.find_tree(entry.id())?;
+                        let new_entry_tree = self.rebuild_tree(&entry_tree, &entry_fullpath)?;
+
+                        if entry_tree.id() != new_entry_tree.id() {
+                            changed = true;
+                        }
+
+                        builder.insert(entry_name, new_entry_tree.id(), entry.filemode())?;
+                    } else {
+                        self.filtered.insert(entry_fullpath);
+                        changed = true;
+                    }
+                }
 
                 let new_tree_id = {
                     if !changed {
@@ -70,20 +112,29 @@ impl<'r> Rebuilder<'r> {
                     .collect::<Result<_>>()?;
 
                 let parents_borrowed: Vec<_> = parents.iter().collect();
+
+                let tree = self
+                    .rebuild_tree(&commit.tree()?, Path::new(""))
+                    .context("failed to rebuild Tree")?;
+
                 let parents_changed = parents.iter().any(|p| self.changed(p.id()));
-                let tree = self.rebuild_tree(commit.tree()?)?;
-                let changed = parents_changed || self.changed(commit.tree()?.id());
+                let tree_changed = self.changed(commit.tree()?.id());
+                let changed = parents_changed || tree_changed;
 
                 let new_commit_id = {
                     if changed {
-                        let new_id = self.repository.commit(
-                            None,
-                            &commit.author(),
-                            &commit.committer(),
-                            commit.message().unwrap_or(""),
-                            &tree,
-                            &parents_borrowed,
-                        )?;
+                        let new_id = self
+                            .repository
+                            .commit(
+                                None,
+                                &commit.author(),
+                                &commit.committer(),
+                                commit.message().unwrap_or(""),
+                                &tree,
+                                &parents_borrowed,
+                            )
+                            .context("failed to create Commit")?;
+
                         eprintln!("{} -> {}", commit.id(), new_id);
                         new_id
                     } else {
@@ -100,27 +151,27 @@ impl<'r> Rebuilder<'r> {
     }
 }
 
-fn read_config(repository: &Repository) -> Config {
+fn read_config(repository: &Repository) -> Result<Config> {
     let config_path = repository
         .path()
         .parent() // Repository::path() points to the .git directory
         .unwrap()
         .join(DEFAULT_CONFIG_PATH);
 
-    eprintln!("Reading config from {}", config_path.display());
+    println!("Reading config from {}", config_path.display());
     let mut config_data = Vec::new();
 
     File::open(config_path)
-        .expect("TODO")
+        .context("failed to open config file")?
         .read_to_end(&mut config_data)
-        .expect("TODO");
+        .context("failed to read config file")?;
 
-    serde_yaml::from_slice(&config_data).expect("TODO")
+    serde_yaml::from_slice(&config_data).context("invalid config format")
 }
 
 fn main() -> Result<()> {
     let rep = Repository::open_from_env()?;
-    let config = read_config(&rep);
+    let config = read_config(&rep).context("could not load config")?;
 
     for remote_config in &config.remotes {
         let commit = {
@@ -128,41 +179,40 @@ fn main() -> Result<()> {
             master.get().peel_to_commit()?
         };
 
-        let mut rebuilder = Rebuilder::new(&rep);
+        let mut rebuilder = Rebuilder::new(&rep, &remote_config.include);
         let new_commit = rebuilder.rebuild_commit(commit)?;
-        rep.branch("master-rebuilt", &new_commit, true)?;
+        rep.branch(WORKING_BRANCH_NAME, &new_commit, true)?;
+        rebuilder.debug_filtered();
 
         let push_cb = || {
             let mut push_cb = RemoteCallbacks::new();
 
-            push_cb.credentials(|_url, username_from_url, _allowed_types| {
-                println!("{} {:?} {:?}", _url, username_from_url, _allowed_types);
-                Cred::ssh_key(
-                    username_from_url.unwrap(),
-                    None,
-                    std::path::Path::new(&format!(
-                        "{}/.ssh/id_ed25519",
-                        std::env::var("HOME").unwrap()
-                    )),
-                    None,
-                )
-            });
+            push_cb
+                .credentials(|_url, username_from_url, _allowed_types| {
+                    Cred::ssh_key(
+                        username_from_url.unwrap(),
+                        None,
+                        std::path::Path::new(&format!(
+                            "{}/.ssh/id_ed25519",
+                            std::env::var("HOME").unwrap()
+                        )),
+                        None,
+                    )
+                })
+                .transfer_progress(|p| {
+                    println!("{}/{}", p.indexed_objects(), p.total_objects());
+                    println!("{}/{}", p.indexed_deltas(), p.total_deltas());
+                    true
+                })
+                .push_update_reference(|reference, status| {
+                    if let Some(msg) = status {
+                        println!(r"/!\ failed to push {reference}: {msg}");
+                    } else {
+                        println!("Successfully pushed {reference}");
+                    }
 
-            push_cb.transfer_progress(|p| {
-                eprintln!("{}/{}", p.indexed_objects(), p.total_objects());
-                eprintln!("{}/{}", p.indexed_deltas(), p.total_deltas());
-                true
-            });
-
-            push_cb.push_update_reference(|reference, status| {
-                if let Some(msg) = status {
-                    eprintln!(r"/!\ failed to push {reference}: {msg}");
-                } else {
-                    eprintln!("Successfully pushed {reference}");
-                }
-
-                Ok(())
-            });
+                    Ok(())
+                });
 
             push_cb
         };
@@ -173,7 +223,9 @@ fn main() -> Result<()> {
         let mut remote = rep.remote_anonymous(&remote_config.url)?;
 
         remote.push(
-            &["refs/heads/master-rebuilt:refs/heads/master-rebuilt"],
+            &[format!(
+                "refs/heads/{WORKING_BRANCH_NAME}:refs/heads/master-rebuilt"
+            )],
             Some(&mut push_opt),
         )?;
 
