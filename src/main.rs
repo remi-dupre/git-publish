@@ -7,8 +7,8 @@ use clap::Parser;
 use git2::{BranchType, Repository};
 
 use config::read_config;
-use git_utils::push_commit;
 use git_utils::rebuilder::Rebuilder;
+use git_utils::remote::push_commit;
 
 #[derive(Parser)]
 #[clap(author, version, about)]

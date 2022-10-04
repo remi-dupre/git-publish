@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use git2::{Commit, Oid, Repository, Tree};
 
 pub struct Rebuilder<'c, 'r> {
